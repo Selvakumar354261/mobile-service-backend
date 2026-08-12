@@ -3,11 +3,13 @@ from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 from datetime import datetime
 from typing import Optional
+import os
+from fastapi import FastAPI, HTTPException
 
 app = FastAPI(title="Mobile Service Tracker")
 
 # ---- Database connection ----
-DATABASE_URL = "postgresql://apple@localhost/mobile_service_db"
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://apple@localhost/mobile_service_db")
 engine = create_engine(DATABASE_URL)
 
 # ---- Pydantic models (request/response shapes) ----
