@@ -32,8 +32,7 @@ def ensure_schema():
                         status TEXT NOT NULL,
                         final_cost NUMERIC,
                         spare_part_used TEXT,
-                        notes TEXT,
-                        changed_at TIMESTAMP NOT NULL DEFAULT NOW()
+                        notes TEXT
                     )
                 """))
                 conn.commit()
@@ -242,10 +241,10 @@ def update_status(service_id: int, update: StatusUpdate):
 def service_history(service_id: int):
     with engine.connect() as conn:
         rows = conn.execute(
-            text("""SELECT history_id, status, final_cost, spare_part_used, notes, changed_at
+            text("""SELECT history_id, status, final_cost, spare_part_used, notes
                      FROM status_history
                      WHERE service_id = :sid
-                     ORDER BY changed_at ASC"""),
+                     ORDER BY history_id ASC"""),
             {"sid": service_id}
         ).fetchall()
     return [dict(r._mapping) for r in rows]
