@@ -11,6 +11,22 @@ app = FastAPI(title="Mobile Service Tracker")
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://apple@localhost/mobile_service_db")
 engine = create_engine(DATABASE_URL)
 
+# No migration tooling in this project — creating the table here (idempotent)
+# keeps local dev and Railway in sync without a manual DB step on deploy.
+with engine.connect() as conn:
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS status_history (
+            history_id SERIAL PRIMARY KEY,
+            service_id INTEGER NOT NULL REFERENCES service_requests(service_id) ON DELETE CASCADE,
+            status TEXT NOT NULL,
+            final_cost NUMERIC,
+            spare_part_used TEXT,
+            notes TEXT,
+            changed_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """))
+    conn.commit()
+
 # ---- Pydantic models (request/response shapes) ----
 class CustomerCreate(BaseModel):
     name: str
@@ -154,17 +170,27 @@ def create_service(service: ServiceCreate):
         result = conn.execute(
             text("""INSERT INTO service_requests (device_id, issue_description, estimated_cost)
                      VALUES (:device_id, :issue_description, :estimated_cost)
-                     RETURNING service_id"""),
+                     RETURNING service_id, status"""),
             {"device_id": service.device_id, "issue_description": service.issue_description,
              "estimated_cost": service.estimated_cost}
         )
+        new_id, initial_status = result.fetchone()
+
+        # First entry of the history timeline — the status a service starts
+        # in when it's received, not something set via the /status endpoint.
+        conn.execute(
+            text("""INSERT INTO status_history (service_id, status)
+                     VALUES (:service_id, :status)"""),
+            {"service_id": new_id, "status": initial_status}
+        )
         conn.commit()
-        new_id = result.fetchone()[0]
     return {"service_id": new_id, "message": "Service request created"}
 
 # ---- Update service status (received -> in_progress -> ready -> delivered) ----
 # COALESCE ensures an empty field in the update dialog does NOT wipe out
-# a previously saved final_cost / spare_part_used / notes value.
+# a previously saved final_cost / spare_part_used / notes value. Every call
+# also appends a status_history row so changes over time can be shown as a
+# timeline, not just the current snapshot.
 @app.put("/service-requests/{service_id}/status")
 def update_status(service_id: int, update: StatusUpdate):
     with engine.connect() as conn:
@@ -176,15 +202,37 @@ def update_status(service_id: int, update: StatusUpdate):
                          spare_part_used = COALESCE(:spare_part_used, spare_part_used),
                          notes = COALESCE(:notes, notes),
                          completed_date = COALESCE(:completed, completed_date)
-                     WHERE service_id = :sid"""),
+                     WHERE service_id = :sid
+                     RETURNING status, final_cost, spare_part_used, notes"""),
             {"status": update.status, "final_cost": update.final_cost,
              "spare_part_used": update.spare_part_used,
              "notes": update.notes, "completed": completed, "sid": service_id}
         )
-        conn.commit()
-        if result.rowcount == 0:
+        row = result.fetchone()
+        if row is None:
             raise HTTPException(status_code=404, detail="Service request not found")
+
+        conn.execute(
+            text("""INSERT INTO status_history (service_id, status, final_cost, spare_part_used, notes)
+                     VALUES (:service_id, :status, :final_cost, :spare_part_used, :notes)"""),
+            {"service_id": service_id, "status": row.status, "final_cost": row.final_cost,
+             "spare_part_used": row.spare_part_used, "notes": row.notes}
+        )
+        conn.commit()
     return {"message": "Status updated"}
+
+# ---- Status change timeline for a service request, oldest first ----
+@app.get("/service-requests/{service_id}/history")
+def service_history(service_id: int):
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""SELECT history_id, status, final_cost, spare_part_used, notes, changed_at
+                     FROM status_history
+                     WHERE service_id = :sid
+                     ORDER BY changed_at ASC"""),
+            {"sid": service_id}
+        ).fetchall()
+    return [dict(r._mapping) for r in rows]
 
 # ---- Pending service requests (not delivered), newest first ----
 @app.get("/service-requests/pending")
