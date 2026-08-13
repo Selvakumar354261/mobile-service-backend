@@ -1,9 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 from datetime import datetime
 from typing import Optional
 import os
+import time
 
 app = FastAPI(title="Mobile Service Tracker")
 
@@ -13,19 +15,33 @@ engine = create_engine(DATABASE_URL)
 
 # No migration tooling in this project — creating the table here (idempotent)
 # keeps local dev and Railway in sync without a manual DB step on deploy.
-with engine.connect() as conn:
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS status_history (
-            history_id SERIAL PRIMARY KEY,
-            service_id INTEGER NOT NULL REFERENCES service_requests(service_id) ON DELETE CASCADE,
-            status TEXT NOT NULL,
-            final_cost NUMERIC,
-            spare_part_used TEXT,
-            notes TEXT,
-            changed_at TIMESTAMP NOT NULL DEFAULT NOW()
-        )
-    """))
-    conn.commit()
+# Runs on FastAPI startup (not at import time) with retries: on Railway, a
+# connection attempted the instant the module is imported can race the
+# platform injecting DATABASE_URL, which previously crashed the whole
+# container instead of just failing one request.
+@app.on_event("startup")
+def ensure_schema():
+    last_error = None
+    for attempt in range(5):
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS status_history (
+                        history_id SERIAL PRIMARY KEY,
+                        service_id INTEGER NOT NULL REFERENCES service_requests(service_id) ON DELETE CASCADE,
+                        status TEXT NOT NULL,
+                        final_cost NUMERIC,
+                        spare_part_used TEXT,
+                        notes TEXT,
+                        changed_at TIMESTAMP NOT NULL DEFAULT NOW()
+                    )
+                """))
+                conn.commit()
+            return
+        except OperationalError as e:
+            last_error = e
+            time.sleep(1)
+    raise last_error
 
 # ---- Pydantic models (request/response shapes) ----
 class CustomerCreate(BaseModel):
