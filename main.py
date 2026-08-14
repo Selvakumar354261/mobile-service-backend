@@ -9,7 +9,12 @@ import hashlib
 import hmac
 import secrets
 import jwt
+import firebase_admin
+from firebase_admin import credentials, messaging
+import json
 
+cred = credentials.Certificate("firebase-key.json")
+firebase_admin.initialize_app(cred)
 app = FastAPI(title="Mobile Service Tracker")
 
 # ---- Database connection ----
@@ -81,6 +86,9 @@ class StatusUpdate(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+class DeviceToken(BaseModel):
+    token: str
 
 @app.get("/")
 def root():
@@ -221,6 +229,20 @@ def create_service(service: ServiceCreate, current_user: dict = Depends(get_curr
         )
         conn.commit()
         new_id = result.fetchone()[0]
+
+        info = conn.execute(
+            text("""SELECT c.name, c.mobile_number, d.brand, d.model
+                     FROM devices d JOIN customers c ON d.customer_id = c.customer_id
+                     WHERE d.device_id = :did"""),
+            {"did": service.device_id}
+        ).fetchone()
+
+    if info:
+        send_push_to_all(
+            "New Service Added",
+            f"{info.name} ({info.mobile_number}) - {info.brand} {info.model}"
+        )
+
     return {"service_id": new_id, "message": "Service request created"}
 
 # ---- Update service status (received -> in_progress -> ready -> delivered) ----
@@ -245,6 +267,22 @@ def update_status(service_id: int, update: StatusUpdate, current_user: dict = De
         conn.commit()
         if result.rowcount == 0:
             raise HTTPException(status_code=404, detail="Service request not found")
+
+        info = conn.execute(
+            text("""SELECT c.name, c.mobile_number, d.brand, d.model
+                     FROM service_requests sr
+                     JOIN devices d ON sr.device_id = d.device_id
+                     JOIN customers c ON d.customer_id = c.customer_id
+                     WHERE sr.service_id = :sid"""),
+            {"sid": service_id}
+        ).fetchone()
+
+    if info:
+        send_push_to_all(
+            f"Status Updated: {update.status}",
+            f"{info.name} ({info.mobile_number}) - {info.brand} {info.model}"
+        )
+
     return {"message": "Status updated"}
 
 # ---- Pending service requests (not delivered), newest first ----
@@ -263,3 +301,29 @@ def pending_services(current_user: dict = Depends(get_current_user)):
                      ORDER BY sr.received_date DESC""")
         ).fetchall()
     return [dict(r._mapping) for r in rows]
+# ---- Register a device's FCM token (called by the app on startup) ----
+@app.post("/register-device")
+def register_device(device_token: DeviceToken):
+    with engine.connect() as conn:
+        conn.execute(
+            text("""INSERT INTO device_tokens (token) VALUES (:token)
+                     ON CONFLICT (token) DO NOTHING"""),
+            {"token": device_token.token}
+        )
+        conn.commit()
+    return {"message": "Token registered"}
+
+# ---- Send a push notification to all registered devices ----
+def send_push_to_all(title: str, body: str):
+    with engine.connect() as conn:
+        tokens = conn.execute(text("SELECT token FROM device_tokens")).fetchall()
+
+    for t in tokens:
+        try:
+            message = messaging.Message(
+                notification=messaging.Notification(title=title, body=body),
+                token=t.token,
+            )
+            messaging.send(message)
+        except Exception as e:
+            print(f"Failed to send to {t.token}: {e}")
