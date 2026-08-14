@@ -5,17 +5,21 @@ from sqlalchemy import create_engine, text
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 import os
+import json
 import hashlib
 import hmac
 import secrets
 import jwt
 import firebase_admin
 from firebase_admin import credentials, messaging
-import json
 
-cred = credentials.Certificate("firebase-key.json")
-firebase_admin.initialize_app(cred)
 app = FastAPI(title="Mobile Service Tracker")
+
+# ---- Firebase (push notifications) ----
+firebase_creds_json = os.environ.get("FIREBASE_CREDENTIALS")
+if firebase_creds_json:
+    cred = credentials.Certificate(json.loads(firebase_creds_json))
+    firebase_admin.initialize_app(cred)
 
 # ---- Database connection ----
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://apple@localhost/mobile_service_db")
@@ -216,6 +220,23 @@ def create_device(device: DeviceCreate, current_user: dict = Depends(get_current
         new_id = result.fetchone()[0]
     return {"device_id": new_id, "message": "Device added"}
 
+# ---- Send a push notification to all registered devices ----
+def send_push_to_all(title: str, body: str):
+    if not firebase_creds_json:
+        return
+    with engine.connect() as conn:
+        tokens = conn.execute(text("SELECT token FROM device_tokens")).fetchall()
+
+    for t in tokens:
+        try:
+            message = messaging.Message(
+                notification=messaging.Notification(title=title, body=body),
+                token=t.token,
+            )
+            messaging.send(message)
+        except Exception as e:
+            print(f"Failed to send to {t.token}: {e}")
+
 # ---- Create a service request (device comes in for repair) ----
 @app.post("/service-requests")
 def create_service(service: ServiceCreate, current_user: dict = Depends(get_current_user)):
@@ -301,6 +322,7 @@ def pending_services(current_user: dict = Depends(get_current_user)):
                      ORDER BY sr.received_date DESC""")
         ).fetchall()
     return [dict(r._mapping) for r in rows]
+
 # ---- Register a device's FCM token (called by the app on startup) ----
 @app.post("/register-device")
 def register_device(device_token: DeviceToken):
@@ -312,18 +334,3 @@ def register_device(device_token: DeviceToken):
         )
         conn.commit()
     return {"message": "Token registered"}
-
-# ---- Send a push notification to all registered devices ----
-def send_push_to_all(title: str, body: str):
-    with engine.connect() as conn:
-        tokens = conn.execute(text("SELECT token FROM device_tokens")).fetchall()
-
-    for t in tokens:
-        try:
-            message = messaging.Message(
-                notification=messaging.Notification(title=title, body=body),
-                token=t.token,
-            )
-            messaging.send(message)
-        except Exception as e:
-            print(f"Failed to send to {t.token}: {e}")
