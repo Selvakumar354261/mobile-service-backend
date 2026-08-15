@@ -316,7 +316,7 @@ def pending_services(current_user: dict = Depends(get_current_user)):
         rows = conn.execute(
             text("""SELECT sr.service_id, sr.issue_description, sr.status, sr.estimated_cost,
                             sr.spare_part_used, sr.final_cost, sr.received_date,
-                            d.device_id, d.brand, d.model, d.lock_type, d.lock_value,
+                            d.device_id, d.brand, d.model, d.lock_type, d.lock_value, d.image_base64,
                             c.customer_id, c.name, c.mobile_number
                      FROM service_requests sr
                      JOIN devices d ON sr.device_id = d.device_id
