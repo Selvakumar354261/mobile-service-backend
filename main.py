@@ -75,6 +75,7 @@ class DeviceCreate(BaseModel):
     imei_number: Optional[str] = None
     lock_type: Optional[str] = None
     lock_value: Optional[str] = None
+    image_base64: Optional[str] = None
 
 class ServiceCreate(BaseModel):
     device_id: int
@@ -164,6 +165,7 @@ def search_customer(mobile_number: str, current_user: dict = Depends(get_current
                 "imei_number": d.imei_number,
                 "lock_type": d.lock_type,
                 "lock_value": d.lock_value,
+                "image_base64": d.image_base64,
                 "services": [dict(s._mapping) for s in services]
             })
 
@@ -209,12 +211,13 @@ def delete_customer(customer_id: int, current_user: dict = Depends(require_admin
 def create_device(device: DeviceCreate, current_user: dict = Depends(get_current_user)):
     with engine.connect() as conn:
         result = conn.execute(
-            text("""INSERT INTO devices (customer_id, brand, model, imei_number, lock_type, lock_value)
-                     VALUES (:customer_id, :brand, :model, :imei_number, :lock_type, :lock_value)
+            text("""INSERT INTO devices (customer_id, brand, model, imei_number, lock_type, lock_value, image_base64)
+                     VALUES (:customer_id, :brand, :model, :imei_number, :lock_type, :lock_value, :image_base64)
                      RETURNING device_id"""),
             {"customer_id": device.customer_id, "brand": device.brand,
              "model": device.model, "imei_number": device.imei_number,
-             "lock_type": device.lock_type, "lock_value": device.lock_value}
+             "lock_type": device.lock_type, "lock_value": device.lock_value,
+             "image_base64": device.image_base64}
         )
         conn.commit()
         new_id = result.fetchone()[0]
